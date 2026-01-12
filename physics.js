@@ -9,12 +9,14 @@ const TOTAL_WIDTH = VIRTUAL_WIDTH * 2;  // 2画面分
 
 // ゲームオブジェクトサイズ
 const PUCK_RADIUS = 30;
-const PADDLE_RADIUS = 50;
+const PADDLE_RADIUS = 70;
 const GOAL_WIDTH = 20;
 const GOAL_HEIGHT = 300;
 
 // 物理定数
-const CONST_SPEED = 20; // 常に一定の速度
+const BASE_SPEED = 20; // 基本速度（これより遅くならない）
+const MAX_SPEED_MULTIPLIER = 1.6; // 最大速度倍率
+const SPEED_DECAY = 0.985; // 速度の減衰率（1フレームごとの掛け合わせ）
 const WALL_BOUNCE = 1.0; // 壁の反射係数（減衰なし）
 
 class PhysicsEngine {
@@ -52,16 +54,29 @@ class PhysicsEngine {
         const wallHit = this.checkWallCollision(); // パドルで押し出された後に壁判定
         const goalSide = this.checkGoal();
 
-        // 速度ベクトルの正規化（常に一定速度にする）
+        // 速度の制御
         const currentSpeed = Math.sqrt(this.puck.vx ** 2 + this.puck.vy ** 2);
 
-        // 動き出しやリセット直後は0の場合がある
-        if (currentSpeed > 0.1) {
-            this.puck.vx = (this.puck.vx / currentSpeed) * CONST_SPEED;
-            this.puck.vy = (this.puck.vy / currentSpeed) * CONST_SPEED;
-        } else if (currentSpeed !== 0 && currentSpeed <= 0.1) {
-            // 極端に遅い場合は強制的に動きを与える（スタック防止）
-            this.puck.vx = CONST_SPEED;
+        if (currentSpeed > BASE_SPEED) {
+            // 基本速度を超えている場合は徐々に減衰させる
+            this.puck.vx *= SPEED_DECAY;
+            this.puck.vy *= SPEED_DECAY;
+
+            // 減衰しすぎて基本速度を下回らないように補正
+            const newSpeed = Math.sqrt(this.puck.vx ** 2 + this.puck.vy ** 2);
+            if (newSpeed < BASE_SPEED) {
+                const ratio = BASE_SPEED / newSpeed;
+                this.puck.vx *= ratio;
+                this.puck.vy *= ratio;
+            }
+        } else if (currentSpeed > 0.1 && currentSpeed < BASE_SPEED) {
+            // 基本速度を下回っている場合は基本速度に引き上げる
+            const ratio = BASE_SPEED / currentSpeed;
+            this.puck.vx *= ratio;
+            this.puck.vy *= ratio;
+        } else if (currentSpeed <= 0.1) {
+            // 止まっている場合は強制的に動きを与える
+            this.puck.vx = BASE_SPEED;
             this.puck.vy = 0;
         }
 
@@ -147,6 +162,14 @@ class PhysicsEngine {
                     this.puck.vx = this.puck.vx - 2 * dotProduct * nx;
                     this.puck.vy = this.puck.vy - 2 * dotProduct * ny;
 
+                    // 速度ブースト：基本速度の1.6倍まで加速
+                    const currentSpeed = Math.sqrt(this.puck.vx ** 2 + this.puck.vy ** 2);
+                    const targetSpeed = Math.min(BASE_SPEED * MAX_SPEED_MULTIPLIER, currentSpeed + BASE_SPEED * 0.4);
+
+                    const boostRatio = targetSpeed / currentSpeed;
+                    this.puck.vx *= boostRatio;
+                    this.puck.vy *= boostRatio;
+
                     hit = side;
                 }
 
@@ -186,23 +209,18 @@ class PhysicsEngine {
         // ゴールされた側の中央にパックを配置
         if (scoredGoalSide === 'left') {
             this.puck.x = VIRTUAL_WIDTH / 2;
-            this.puck.vx = -CONST_SPEED * 0.5; // サーブ速度は少し遅くする？いや、一定にする
         } else {
             this.puck.x = VIRTUAL_WIDTH + VIRTUAL_WIDTH / 2;
-            this.puck.vx = CONST_SPEED * 0.5;
         }
 
-        // 正規化ロジックに合わせて少し速度を持たせる
         this.puck.y = VIRTUAL_HEIGHT / 2;
         this.puck.vy = 0;
 
-        // リセット直後は少し遅くてもいいかもしれないが、
-        // updateで即座にCONST_SPEEDになるので、初期ベクトルだけ設定しておく
-        // X方向への速度を与える
+        // ゴールされた側から相手側に向かって発射する
         if (scoredGoalSide === 'left') {
-            this.puck.vx = -CONST_SPEED;
+            this.puck.vx = BASE_SPEED; // 左ゴールされたので、右へ
         } else {
-            this.puck.vx = CONST_SPEED;
+            this.puck.vx = -BASE_SPEED; // 右ゴールされたので、左へ
         }
     }
 

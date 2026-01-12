@@ -1,6 +1,100 @@
 /**
  * Game Controller - メインゲームロジック
  */
+
+// ===== Effects =====
+class Particle {
+    constructor(x, y, color) {
+        this.x = x;
+        this.y = y;
+        const angle = Math.random() * Math.PI * 2;
+        const speed = Math.random() * 8 + 3;
+        this.vx = Math.cos(angle) * speed;
+        this.vy = Math.sin(angle) * speed;
+        this.life = 1.0;
+        this.decay = Math.random() * 0.02 + 0.01;
+        this.color = color;
+        this.size = Math.random() * 5 + 3;
+    }
+    update() {
+        this.x += this.vx;
+        this.y += this.vy;
+        this.vx *= 0.95; // 減速
+        this.vy *= 0.95;
+        this.life -= this.decay;
+        return this.life > 0;
+    }
+    render(ctx) {
+        ctx.save();
+        ctx.globalAlpha = this.life;
+        ctx.fillStyle = this.color;
+        ctx.beginPath();
+        ctx.arc(this.x, this.y, this.size, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+    }
+}
+
+class EffectManager {
+    constructor() {
+        this.particles = [];
+        this.shakeTime = 0;
+        this.shakeIntensity = 0;
+    }
+
+    spawnExplosion(x, y, color = '#ffcc00') {
+        const count = 50;
+        for (let i = 0; i < count; i++) {
+            this.particles.push(new Particle(x, y, color));
+        }
+        this.shake(0.5, 15);
+    }
+
+    shake(duration, intensity) {
+        this.shakeTime = duration;
+        this.shakeIntensity = intensity;
+    }
+
+    update(deltaTime) {
+        this.particles = this.particles.filter(p => p.update());
+        if (this.shakeTime > 0) {
+            this.shakeTime -= deltaTime;
+            if (this.shakeTime < 0) this.shakeTime = 0;
+        }
+    }
+
+    render(ctx) {
+        this.particles.forEach(p => p.render(ctx));
+    }
+
+    getShakeOffset() {
+        if (this.shakeTime <= 0) return { x: 0, y: 0 };
+        const force = this.shakeIntensity * (this.shakeTime / 0.5); // 減衰
+        return {
+            x: (Math.random() - 0.5) * force,
+            y: (Math.random() - 0.5) * force
+        };
+    }
+
+    triggerGoalAnimation() {
+        const el = document.getElementById('goal-text');
+        const overlay = document.getElementById('goal-overlay');
+
+        overlay.classList.remove('hidden');
+        el.classList.remove('animate');
+
+        // リフロー強制
+        void el.offsetWidth;
+
+        el.classList.add('animate');
+
+        // アニメーション終了後に隠す
+        setTimeout(() => {
+            overlay.classList.add('hidden');
+        }, 2500);
+    }
+}
+
 class Game {
     constructor() {
         this.canvas = null;
@@ -35,6 +129,7 @@ class Game {
         this.canvas = document.getElementById('game-canvas');
         this.ctx = this.canvas.getContext('2d');
         this.physics = new PhysicsEngine();
+        this.effectManager = new EffectManager();
 
         this.setupCanvas();
         this.setupInput();
@@ -160,6 +255,7 @@ class Game {
             switch (event) {
                 case 'goal':
                     audioManager.playGoal();
+                    this.handleGoalEffect(payload.side);
                     break;
                 case 'start':
                     audioManager.playStart();
@@ -194,6 +290,7 @@ class Game {
         this.lastTime = now;
 
         this.update(deltaTime);
+        this.effectManager.update(deltaTime); // エフェクト更新
         this.render();
 
         requestAnimationFrame(() => this.loop());
@@ -229,6 +326,9 @@ class Game {
 
                 // ゴールイベントは必ず送信
                 syncManager.sendGameEvent('goal', { side: result.goalSide });
+
+                // エフェクト発動
+                this.handleGoalEffect(result.goalSide);
 
                 this.updateScoreDisplay();
                 this.checkWin();
@@ -266,7 +366,11 @@ class Game {
         ctx.fillRect(0, 0, w, h);
 
         ctx.save();
-        ctx.translate(this.offsetX, this.offsetY);
+
+        // 画面シェイク適用
+        const shake = this.effectManager.getShakeOffset();
+        ctx.translate(this.offsetX + shake.x, this.offsetY + shake.y);
+
         ctx.scale(this.scale, this.scale);
 
         // 自分の担当領域のみ描画
@@ -288,6 +392,9 @@ class Game {
 
         // パック
         this.drawPuck();
+
+        // エフェクト描画（座標系変換後）
+        this.effectManager.render(ctx);
 
         ctx.restore();
     }
@@ -420,6 +527,21 @@ class Game {
     stop() {
         this.isRunning = false;
     }
+
+    handleGoalEffect(goalSide) {
+        // goalSide は「ゴールされた側」。エフェクトはゴール位置（左右端）に出す
+        // leftゴールにパックが入った（＝右プレイヤーの得点）
+
+        const isLeftGoal = goalSide === 'left';
+        const x = isLeftGoal ? GOAL_WIDTH : TOTAL_WIDTH - GOAL_WIDTH;
+        const y = (VIRTUAL_HEIGHT / 2); // ゴール中央
+
+        // パーティクル発生
+        this.effectManager.spawnExplosion(x, y, isLeftGoal ? '#ff4444' : '#4444ff');
+
+        // 文字演出
+        this.effectManager.triggerGoalAnimation();
+    }
 }
 
 // ===== UI Controller =====
@@ -442,6 +564,22 @@ document.addEventListener('DOMContentLoaded', () => {
 
     document.getElementById('restart-game-btn').addEventListener('click', () => {
         location.reload();
+    });
+
+    // ミュートボタンの制御
+    const muteToggle = document.getElementById('mute-toggle');
+    if (!this.isHost) {
+        muteToggle.style.display = 'none';
+    }
+
+    muteToggle.addEventListener('click', () => {
+        const isMuted = audioManager.toggleMute();
+        muteToggle.textContent = isMuted ? '🔇' : '🔊';
+        muteToggle.classList.toggle('muted', isMuted);
+
+        // 初回クリック時にオーディオコンテキストを初期化/再開する（ブラウザ制限対策）
+        audioManager.init();
+        audioManager.resume();
     });
 
     // ===== ホストとして開始 =====

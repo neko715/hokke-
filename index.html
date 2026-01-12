@@ -59,6 +59,7 @@
 
     <!-- ゲーム画面 -->
     <div id="game-screen" class="screen hidden">
+        <button id="mute-toggle" class="audio-btn" title="ミュート切替">🔊</button>
         <canvas id="game-canvas"></canvas>
         <div id="score-display">
             <span id="my-score">0</span>
@@ -66,6 +67,11 @@
             <span id="opponent-score">0</span>
         </div>
         <div id="game-message" class="hidden"></div>
+
+        <!-- ゴール演出オーバーレイ -->
+        <div id="goal-overlay" class="overlay hidden no-bg">
+            <div id="goal-text">GOAL!!</div>
+        </div>
 
         <!-- 結果表示オーバーレイ -->
         <div id="result-overlay" class="overlay hidden">
