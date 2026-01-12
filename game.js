@@ -42,12 +42,22 @@ class EffectManager {
         this.shakeIntensity = 0;
     }
 
-    spawnExplosion(x, y, color = '#ffcc00') {
-        const count = 50;
+    spawnExplosion(x, y, color = '#ffcc00', isSmash = false) {
+        const count = isSmash ? 150 : 50;
+        const spread = isSmash ? 15 : 8;
         for (let i = 0; i < count; i++) {
-            this.particles.push(new Particle(x, y, color));
+            const particle = new Particle(x, y, color);
+            if (isSmash) {
+                const angle = Math.random() * Math.PI * 2;
+                const speed = Math.random() * 20 + 5;
+                particle.vx = Math.cos(angle) * speed;
+                particle.vy = Math.sin(angle) * speed;
+                particle.size *= 2;
+                particle.decay *= 0.5;
+            }
+            this.particles.push(particle);
         }
-        this.shake(0.5, 15);
+        this.shake(isSmash ? 0.8 : 0.5, isSmash ? 30 : 15);
     }
 
     shake(duration, intensity) {
@@ -115,7 +125,7 @@ class Game {
         this.targetY = 0;
 
         // 勝利条件
-        this.winScore = 7;
+        this.winScore = 5;
 
         // 補間用ターゲット（ゲスト用）
         this.targetPuck = null;
@@ -224,7 +234,14 @@ class Game {
         syncManager.onStateReceived = (state) => {
             if (!this.isHost) {
                 // 全体更新ではなく必要な部分のみ更新 & ターゲット設定
-                if (state.puck) this.targetPuck = state.puck;
+                if (state.puck) {
+                    this.targetPuck = state.puck;
+
+                    // 速度と状態は即時同期して予測を合わせる
+                    this.physics.puck.vx = state.puck.vx;
+                    this.physics.puck.vy = state.puck.vy;
+                    this.physics.puck.smashTimeLeft = state.puck.smashTimeLeft || 0;
+                }
                 if (state.paddles && state.paddles.left) this.targetOpponentPaddle = state.paddles.left;
 
                 // スコアは即時反映
@@ -256,6 +273,10 @@ class Game {
                 case 'goal':
                     audioManager.playGoal();
                     this.handleGoalEffect(payload.side);
+                    break;
+                case 'smash':
+                    audioManager.playSmashHit();
+                    this.handleSmashEffect(payload.x, payload.y);
                     break;
                 case 'start':
                     audioManager.playStart();
@@ -311,25 +332,33 @@ class Game {
             );
         }
 
+        // デバイスに関わらず物理演算を実行（クライアントサイド予測）
+        const result = this.physics.update(deltaTime);
+
         // パドル位置を送信
         syncManager.sendPaddlePosition(myPaddle.x, myPaddle.y);
 
-        // ホストのみ物理演算
-        if (this.isHost) {
-            const result = this.physics.update(deltaTime);
+        // 効果音とエフェクトの処理
+        if (result.wallHit) audioManager.playWallHit();
 
-            // 効果音
-            if (result.wallHit) audioManager.playWallHit();
-            if (result.paddleHit) audioManager.playPaddleHit();
+        if (result.paddleHit) {
+            // 自分のパドルヒット、またはホスト側での相手パドルヒットを検知
+            if (result.isSmash) {
+                audioManager.playSmashHit();
+                this.handleSmashEffect(this.physics.puck.x, this.physics.puck.y);
+                if (this.isHost) {
+                    syncManager.sendGameEvent('smash', { x: this.physics.puck.x, y: this.physics.puck.y });
+                }
+            } else {
+                audioManager.playPaddleHit();
+            }
+        }
+
+        if (this.isHost) {
             if (result.goalSide) {
                 audioManager.playGoal();
-
-                // ゴールイベントは必ず送信
                 syncManager.sendGameEvent('goal', { side: result.goalSide });
-
-                // エフェクト発動
                 this.handleGoalEffect(result.goalSide);
-
                 this.updateScoreDisplay();
                 this.checkWin();
             }
@@ -337,8 +366,8 @@ class Game {
             // 状態を送信
             syncManager.sendState(this.physics.getState());
         } else {
-            // ゲスト：補間移動処理 (Lerp)
-            const alpha = 0.3; // 補間係数 (0.1~0.5くらいで調整)
+            // ゲスト：ホストの状態に緩やかに補正 (Lerp)
+            const alpha = 0.2; // 補間を少し弱めて予測を優先
 
             // 相手パドル(left)
             if (this.targetOpponentPaddle) {
@@ -347,9 +376,10 @@ class Game {
                 current.y += (this.targetOpponentPaddle.y - current.y) * alpha;
             }
 
-            // パック
+            // パック位置の補正
             if (this.targetPuck) {
                 const current = this.physics.puck;
+                // 位置のズレを少しずつ修正
                 current.x += (this.targetPuck.x - current.x) * alpha;
                 current.y += (this.targetPuck.y - current.y) * alpha;
             }
@@ -469,16 +499,26 @@ class Game {
     drawPuck() {
         const ctx = this.ctx;
         const puck = this.physics.puck;
+        const isSmashing = puck.smashTimeLeft > 0;
 
         // グロー効果
-        ctx.shadowColor = '#fff';
-        ctx.shadowBlur = 15;
+        ctx.shadowColor = isSmashing ? '#ff4400' : '#fff';
+        ctx.shadowBlur = isSmashing ? 40 : 15;
 
         // パック本体
         ctx.beginPath();
         ctx.arc(puck.x, puck.y, PUCK_RADIUS, 0, Math.PI * 2);
-        ctx.fillStyle = '#fff';
+        ctx.fillStyle = isSmashing ? '#ffcc00' : '#fff';
         ctx.fill();
+
+        // スマッシュ時のオーラ
+        if (isSmashing) {
+            ctx.beginPath();
+            ctx.arc(puck.x, puck.y, PUCK_RADIUS + 10, 0, Math.PI * 2);
+            ctx.strokeStyle = '#ff4400';
+            ctx.lineWidth = 4;
+            ctx.stroke();
+        }
 
         // 内側のパターン
         ctx.beginPath();
@@ -488,6 +528,10 @@ class Game {
         ctx.stroke();
 
         ctx.shadowBlur = 0;
+    }
+
+    handleSmashEffect(x, y) {
+        this.effectManager.spawnExplosion(x, y, '#ff4400', true);
     }
 
     updateScoreDisplay() {
@@ -568,19 +612,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // ミュートボタンの制御
     const muteToggle = document.getElementById('mute-toggle');
-    if (!this.isHost) {
-        muteToggle.style.display = 'none';
-    }
-
-    muteToggle.addEventListener('click', () => {
-        const isMuted = audioManager.toggleMute();
-        muteToggle.textContent = isMuted ? '🔇' : '🔊';
-        muteToggle.classList.toggle('muted', isMuted);
-
-        // 初回クリック時にオーディオコンテキストを初期化/再開する（ブラウザ制限対策）
-        audioManager.init();
-        audioManager.resume();
-    });
+    if (muteToggle) muteToggle.style.display = 'none';
 
     // ===== ホストとして開始 =====
     hostBtn.addEventListener('click', async () => {

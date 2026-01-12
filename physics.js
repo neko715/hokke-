@@ -15,10 +15,14 @@ const GOAL_HEIGHT = 300;
 
 // 物理定数
 const BASE_SPEED = 20; // 基本速度（これより遅くならない）
-const MAX_SPEED_MULTIPLIER = 1.6; // 最大速度倍率
-const SPEED_DECAY = 0.985; // 速度の減衰率（1フレームごとの掛け合わせ）
+const MAX_SPEED_MULTIPLIER = 1.6; // 通常の最大速度倍率
+const SMASH_SPEED_MULTIPLIER = 2.0; // スマッシュ時の速度倍率
+const SPEED_DECAY = 0.985; // 通常の速度減衰率
+const SMASH_DECAY = 0.995; // スマッシュ時の緩やかな減衰率
 const WALL_BOUNCE = 1.0; // 壁の反射係数（減衰なし）
 
+const SMASH_PADDLE_THRESHOLD = 120; // スマッシュが発生するパドル速度の閾値（難易度調整のため引き上げ）
+const SMASH_DURATION = 1.0; // スマッシュの持続時間（秒）
 class PhysicsEngine {
     constructor() {
         this.puck = {
@@ -26,12 +30,13 @@ class PhysicsEngine {
             y: VIRTUAL_HEIGHT / 2,
             vx: 0,
             vy: 0,
-            radius: PUCK_RADIUS
+            radius: PUCK_RADIUS,
+            smashTimeLeft: 0
         };
 
         this.paddles = {
-            left: { x: 200, y: VIRTUAL_HEIGHT / 2, radius: PADDLE_RADIUS },
-            right: { x: TOTAL_WIDTH - 200, y: VIRTUAL_HEIGHT / 2, radius: PADDLE_RADIUS }
+            left: { x: 200, y: VIRTUAL_HEIGHT / 2, lastX: 200, lastY: VIRTUAL_HEIGHT / 2, radius: PADDLE_RADIUS },
+            right: { x: TOTAL_WIDTH - 200, y: VIRTUAL_HEIGHT / 2, lastX: TOTAL_WIDTH - 200, lastY: TOTAL_WIDTH - 200, radius: PADDLE_RADIUS }
         };
 
         this.goals = {
@@ -54,33 +59,43 @@ class PhysicsEngine {
         const wallHit = this.checkWallCollision(); // パドルで押し出された後に壁判定
         const goalSide = this.checkGoal();
 
+        // スマッシュ持続時間の更新
+        if (this.puck.smashTimeLeft > 0) {
+            this.puck.smashTimeLeft = Math.max(0, this.puck.smashTimeLeft - deltaTime);
+        }
+
         // 速度の制御
         const currentSpeed = Math.sqrt(this.puck.vx ** 2 + this.puck.vy ** 2);
+        const isSmashing = this.puck.smashTimeLeft > 0;
+        const targetMinSpeed = isSmashing ? BASE_SPEED * SMASH_SPEED_MULTIPLIER : BASE_SPEED;
+        const decayRate = isSmashing ? SMASH_DECAY : SPEED_DECAY;
 
-        if (currentSpeed > BASE_SPEED) {
-            // 基本速度を超えている場合は徐々に減衰させる
-            this.puck.vx *= SPEED_DECAY;
-            this.puck.vy *= SPEED_DECAY;
+        if (currentSpeed > targetMinSpeed) {
+            this.puck.vx *= decayRate;
+            this.puck.vy *= decayRate;
 
-            // 減衰しすぎて基本速度を下回らないように補正
             const newSpeed = Math.sqrt(this.puck.vx ** 2 + this.puck.vy ** 2);
-            if (newSpeed < BASE_SPEED) {
-                const ratio = BASE_SPEED / newSpeed;
+            if (newSpeed < targetMinSpeed) {
+                const ratio = targetMinSpeed / newSpeed;
                 this.puck.vx *= ratio;
                 this.puck.vy *= ratio;
             }
-        } else if (currentSpeed > 0.1 && currentSpeed < BASE_SPEED) {
-            // 基本速度を下回っている場合は基本速度に引き上げる
-            const ratio = BASE_SPEED / currentSpeed;
+        } else if (currentSpeed > 0.1 && currentSpeed < targetMinSpeed) {
+            const ratio = targetMinSpeed / currentSpeed;
             this.puck.vx *= ratio;
             this.puck.vy *= ratio;
         } else if (currentSpeed <= 0.1) {
-            // 止まっている場合は強制的に動きを与える
-            this.puck.vx = BASE_SPEED;
+            this.puck.vx = targetMinSpeed;
             this.puck.vy = 0;
         }
 
-        return { wallHit, paddleHit, goalSide };
+        // パドルの前回位置を更新（次のフレームのCCD用）
+        this.paddles.left.lastX = this.paddles.left.x;
+        this.paddles.left.lastY = this.paddles.left.y;
+        this.paddles.right.lastX = this.paddles.right.x;
+        this.paddles.right.lastY = this.paddles.right.y;
+
+        return { wallHit, paddleHit, goalSide, isSmash: isSmashing };
     }
 
     checkWallCollision() {
@@ -127,55 +142,88 @@ class PhysicsEngine {
         let hit = null;
 
         for (const [side, paddle] of Object.entries(this.paddles)) {
-            const dx = this.puck.x - paddle.x;
-            const dy = this.puck.y - paddle.y;
+            // CCD: パドルの移動軌跡(線分)とパックの距離
+            const ax = paddle.lastX;
+            const ay = paddle.lastY;
+            const bx = paddle.x;
+            const by = paddle.y;
+            const px = this.puck.x;
+            const py = this.puck.y;
+
+            const bax = bx - ax;
+            const bay = by - ay;
+            const pax = px - ax;
+            const pay = py - ay;
+
+            let t = (pax * bax + pay * bay) / (bax * bax + bay * bay);
+            if (isNaN(t)) t = 0;
+            t = Math.max(0, Math.min(1, t));
+
+            const closestX = ax + bax * t;
+            const closestY = ay + bay * t;
+
+            const dx = px - closestX;
+            const dy = py - closestY;
             const dist = Math.sqrt(dx * dx + dy * dy);
             const minDist = PUCK_RADIUS + PADDLE_RADIUS;
 
             if (dist < minDist) {
-                // 衝突応答
+                // パドルの速度
+                const pvx = bx - ax;
+                const pvy = by - ay;
 
-                // 法線ベクトル (パドル中心 -> パック中心)
+                // 法線
                 let nx, ny;
-                if (dist === 0) {
-                    // 完全に重なった場合はランダムに弾く
-                    nx = 1;
-                    ny = 0;
+                if (dist < 0.1) {
+                    nx = 1; ny = 0;
                 } else {
                     nx = dx / dist;
                     ny = dy / dist;
                 }
 
-                // 押し出し（めり込み解消）
-                // 少し余裕を持って押し出す (+1.0)
-                const overlap = minDist - dist + 1.0;
-                this.puck.x += nx * overlap;
-                this.puck.y += ny * overlap;
+                // 現時点での相対速度
+                const rvx = this.puck.vx - pvx;
+                const rvy = this.puck.vy - pvy;
 
-                // 反射ベクトル計算
-                // 速度成分のうち、法線方向の成分を反転させる
-                const dotProduct = this.puck.vx * nx + this.puck.vy * ny;
+                // 相対速度がパドルに向かっている場合のみ反射
+                const relDot = rvx * nx + rvy * ny;
 
-                // パックがパドルに向かって進んでいる場合のみ反射処理を行う
-                // (すでに離れようとしている場合は処理しない＝二重衝突防止)
-                if (dotProduct < 0) {
-                    this.puck.vx = this.puck.vx - 2 * dotProduct * nx;
-                    this.puck.vy = this.puck.vy - 2 * dotProduct * ny;
+                if (relDot < 0) {
+                    // 反射 (相対速度を法線基準で反転)
+                    const rvx_prime = rvx - 2 * relDot * nx;
+                    const rvy_prime = rvy - 2 * relDot * ny;
 
-                    // 速度ブースト：基本速度の1.6倍まで加速
-                    const currentSpeed = Math.sqrt(this.puck.vx ** 2 + this.puck.vy ** 2);
-                    const targetSpeed = Math.min(BASE_SPEED * MAX_SPEED_MULTIPLIER, currentSpeed + BASE_SPEED * 0.4);
+                    // パックの新しい速度 = 反射した相対速度 + パドルの速度
+                    this.puck.vx = rvx_prime + pvx;
+                    this.puck.vy = rvy_prime + pvy;
 
-                    const boostRatio = targetSpeed / currentSpeed;
-                    this.puck.vx *= boostRatio;
-                    this.puck.vy *= boostRatio;
+                    // 押し出し
+                    const overlap = minDist - dist + 2.0;
+                    this.puck.x += nx * overlap;
+                    this.puck.y += ny * overlap;
+
+                    // スマッシュ判定：パドルの速度が閾値を超えているか
+                    const paddleSpeed = Math.sqrt(pvx ** 2 + pvy ** 2);
+                    if (paddleSpeed > SMASH_PADDLE_THRESHOLD) {
+                        this.puck.smashTimeLeft = SMASH_DURATION;
+
+                        // スマッシュ速度へ即座にブースト
+                        const speed = Math.sqrt(this.puck.vx ** 2 + this.puck.vy ** 2);
+                        const targetSpeed = BASE_SPEED * SMASH_SPEED_MULTIPLIER;
+                        this.puck.vx = (this.puck.vx / speed) * targetSpeed;
+                        this.puck.vy = (this.puck.vy / speed) * targetSpeed;
+                    } else {
+                        this.puck.smashTimeLeft = 0; // 通常ヒットで上書き
+                        // 速度ブースト (最低速度保証含む)
+                        const speed = Math.sqrt(this.puck.vx ** 2 + this.puck.vy ** 2);
+                        const targetSpeed = Math.max(BASE_SPEED, Math.min(BASE_SPEED * MAX_SPEED_MULTIPLIER, speed + BASE_SPEED * 0.3));
+                        const ratio = targetSpeed / speed;
+                        this.puck.vx *= ratio;
+                        this.puck.vy *= ratio;
+                    }
 
                     hit = side;
                 }
-
-                // ここで速度加算（this.puck.vx += ...）は行わない。
-                // 速度はupdateの最後でCONST_SPEEDに正規化されるため、
-                // 重要なのは「方向」だけを変えること。
             }
         }
 

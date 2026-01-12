@@ -17,33 +17,33 @@ class AudioManager {
         }
     }
 
-    resume() {
-        if (this.context && this.context.state === 'suspended') {
-            this.context.resume();
-        }
-    }
-
     toggleMute() {
-        this.isMuted = !this.isMuted;
-        return this.isMuted;
+        return false;
     }
 
-    // パドル衝突音（アタックの強いサウンド）
+    // パドル衝突音
     playPaddleHit() {
-        if (this.isMuted || !this.context) return;
+        if (!this.context) return;
         this.playTone(600, 0.1, 'triangle', 0.4);
-        this.playNoise(8000, 0.02, 0.2); // 「コツン」という高域ノイズ
+        this.playNoise(8000, 0.02, 0.2);
     }
 
-    // 壁衝突音（低域の効いたサウンド）
+    // スマッシュ音（重厚で爆発的なサウンド）
+    playSmashHit() {
+        if (!this.context) return;
+        this.playTone(200, 0.3, 'square', 0.5);
+        this.playTone(100, 0.4, 'sine', 0.6);
+        this.playNoise(2000, 0.3, 0.5);
+        this.playNoise(10000, 0.05, 0.4);
+    }
+
     playWallHit() {
-        if (this.isMuted || !this.context) return;
+        if (!this.context) return;
         this.playTone(150, 0.1, 'sine', 0.5);
     }
 
-    // ゴール音（上昇アルペジオ + 爆発音）
     playGoal() {
-        if (this.isMuted || !this.context) return;
+        if (!this.context) return;
 
         // 上昇音
         const now = this.context.currentTime;
@@ -56,9 +56,8 @@ class AudioManager {
         this.playNoise(100, 0.5, 0.3);
     }
 
-    // ゲーム開始音
     playStart() {
-        if (this.isMuted || !this.context) return;
+        if (!this.context) return;
         const now = this.context.currentTime;
         this.playTone(523.25, 0.1, 'sine', 0.3, now);
         this.playTone(659.25, 0.1, 'sine', 0.3, now + 0.1);
